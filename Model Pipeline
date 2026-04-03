@@ -1,0 +1,240 @@
+# ============================================================
+# ECO-SYNTH FULL PIPELINE (AUTO-FIXED DATA VERSION)
+# ============================================================
+
+!pip install pandas numpy scikit-learn matplotlib seaborn shap geopandas requests
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import shap
+import requests
+import geopandas as gpd
+from io import StringIO
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+
+
+# ============================================================
+# 1. Download Plastic Waste Data (OWID)
+# ============================================================
+
+print("Downloading plastic waste data...")
+
+plastic_url = "https://ourworldindata.org/grapher/mismanaged-plastic-waste.csv"
+
+resp = requests.get(plastic_url)
+
+if resp.status_code != 200:
+    raise Exception("Plastic dataset download failed")
+
+plastic_df = pd.read_csv(StringIO(resp.text))
+
+
+# Show columns so we can debug
+print("\nAvailable columns:")
+print(plastic_df.columns.tolist())
+
+
+# ============================================================
+# 2. Auto-detect Correct Columns
+# ============================================================
+
+# Country column
+country_col = [c for c in plastic_df.columns if "entity" in c.lower()][0]
+
+# Waste column (auto detect)
+waste_col = [
+    c for c in plastic_df.columns
+    if "plastic" in c.lower() and "waste" in c.lower()
+][0]
+
+# Year column
+year_col = [c for c in plastic_df.columns if "year" in c.lower()][0]
+
+print("\nUsing columns:")
+print("Country:", country_col)
+print("Waste:", waste_col)
+print("Year:", year_col)
+
+
+# ============================================================
+# 3. Clean Plastic Data
+# ============================================================
+
+plastic_df = plastic_df.sort_values(year_col)\
+                       .groupby(country_col)\
+                       .tail(1)
+
+plastic_df = plastic_df[[country_col, waste_col]]
+
+plastic_df.columns = ["country", "mismanaged_waste"]
+
+plastic_df = plastic_df.dropna()
+
+print("\nCountries loaded:", len(plastic_df))
+
+
+# ============================================================
+# 4. Download Country Geometry
+# ============================================================
+
+print("Downloading country geometry...")
+
+geo_url = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson"
+
+world = gpd.read_file(geo_url)
+
+world["lat"] = world.geometry.centroid.y
+world["lon"] = world.geometry.centroid.x
+
+geo_df = world[["NAME", "lat", "lon"]]
+geo_df.columns = ["country", "lat", "lon"]
+
+
+# ============================================================
+# 5. Merge Datasets
+# ============================================================
+
+eco_df = plastic_df.merge(geo_df, on="country", how="inner")
+
+print("Merged rows:", len(eco_df))
+
+
+# ============================================================
+# 6. Realistic Ocean Temperature Model
+# ============================================================
+
+def ocean_temp(lat):
+    return np.clip(30 - 0.4 * abs(lat), 2, 31)
+
+eco_df["ocean_temp"] = eco_df["lat"].apply(ocean_temp)
+
+
+# ============================================================
+# 7. Realistic Environmental Conditions
+# ============================================================
+
+np.random.seed(42)
+
+eco_df["optimal_temp_C"] = eco_df["ocean_temp"] + np.random.normal(0, 1, len(eco_df))
+eco_df["optimal_temp_C"] = np.clip(eco_df["optimal_temp_C"], 3, 31)
+
+eco_df["optimal_pH"] = np.random.uniform(7.8, 8.2, len(eco_df))
+eco_df["optimal_salinity"] = np.random.uniform(33, 36, len(eco_df))
+
+eco_df["plastic_type"] = np.random.choice(
+    ["PET", "PE", "PVC"],
+    size=len(eco_df)
+)
+
+
+# ============================================================
+# 8. Target Construction (Degradation Potential)
+# ============================================================
+
+eco_df["enzyme_hits"] = (
+    0.00002 * eco_df["mismanaged_waste"] +
+    4 * (eco_df["optimal_temp_C"] / 30) +
+    np.random.normal(0, 1, len(eco_df))
+)
+
+eco_df["enzyme_hits"] = eco_df["enzyme_hits"].clip(0)
+
+
+# ============================================================
+# 9. Machine Learning
+# ============================================================
+
+features = [
+    "mismanaged_waste",
+    "optimal_temp_C",
+    "optimal_pH",
+    "optimal_salinity"
+]
+
+X = eco_df[features]
+y = eco_df["enzyme_hits"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+scaler = StandardScaler()
+
+X_train_s = scaler.fit_transform(X_train)
+X_test_s = scaler.transform(X_test)
+
+model = RandomForestRegressor(
+    n_estimators=300,
+    max_depth=10,
+    random_state=42
+)
+
+model.fit(X_train_s, y_train)
+
+eco_df["predicted_enzyme_hits"] = model.predict(
+    scaler.transform(X)
+)
+
+
+# ============================================================
+# 10. SHAP Analysis
+# ============================================================
+
+print("Running SHAP...")
+
+explainer = shap.Explainer(model, X_train_s)
+shap_values = explainer(X_test_s)
+
+# shap.summary_plot(
+#     shap_values,
+#     X_test,
+#     feature_names=features
+# )
+shap.plots.bar(shap_values)
+
+# ============================================================
+# 11. Evaluation
+# ============================================================
+
+plt.figure(figsize=(7,6))
+
+plt.scatter(
+    eco_df["enzyme_hits"],
+    eco_df["predicted_enzyme_hits"],
+    alpha=0.6
+)
+
+plt.xlabel("Actual")
+plt.ylabel("Predicted")
+plt.title("Prediction Accuracy")
+plt.show()
+
+
+# ============================================================
+# 12. Top Countries
+# ============================================================
+
+top = eco_df.sort_values(
+    "predicted_enzyme_hits",
+    ascending=False
+).head(10)
+
+print("\nTop 10 Countries:\n")
+
+print(
+    top[[
+        "country",
+        "plastic_type",
+        "predicted_enzyme_hits",
+        "optimal_temp_C",
+        "optimal_pH",
+        "optimal_salinity"
+    ]]
+)
+
+
+print("\nECO-SYNTH PIPELINE COMPLETED SUCCESSFULLY")
