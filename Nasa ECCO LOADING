@@ -1,0 +1,33 @@
+import matplotlib.pyplot as plt
+
+# Define your hotspots (Add all 110 here)
+hotspots = {
+    "Great Pacific Garbage Patch": {"lat": 25.0, "lon": -140.0},
+    "Mediterranean Center": {"lat": 35.0, "lon": 18.0},
+    "North Atlantic Gyre": {"lat": 30.0, "lon": -40.0}
+}
+
+print(f"{'Hotspot':<30} | {'Temp (°C)':<10} | {'Salinity (PSU)':<15}")
+print("-" * 60)
+
+# Store results for plotting
+results_summary = {}
+
+for name, coord in hotspots.items():
+    # .sel finds the nearest data point on the NASA 0.5-degree grid
+    region_ds = ds.sel(latitude=coord['lat'], longitude=coord['lon'], method='nearest')
+    
+    # Calculate means over the 4 files (temporal mean)
+    avg_temp = float(region_ds.THETA.mean())
+    avg_salt = float(region_ds.SALT.mean())
+    
+    results_summary[name] = avg_temp
+    print(f"{name:<30} | {avg_temp:<10.2f} | {avg_salt:<15.2f}")
+
+# 2. Visualize the Enzyme Activity Potential
+plt.figure(figsize=(10, 5))
+plt.bar(results_summary.keys(), results_summary.values(), color='teal')
+plt.ylabel('Potential Temperature (°C)')
+plt.title('ECO-SYNTH Regional Enzyme Thermal Profiles (NASA ECCO v4r4)')
+plt.xticks(rotation=45)
+plt.show()
