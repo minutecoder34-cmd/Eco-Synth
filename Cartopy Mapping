@@ -1,0 +1,37 @@
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.util import add_cyclic_point
+
+# 1. Prepare the Data
+# Select the first time slice and the surface depth (level 0)
+sst_data = ds.THETA.isel(time=0, Z=0)
+
+# 2. Setup the Map Projection (Robinson matches your image)
+plt.figure(figsize=(15, 8))
+ax = plt.axes(projection=ccrs.Robinson())
+
+# Add a background "cyclic point" to prevent a white line at 0° Longitude
+data_cyclic, lon_cyclic = add_cyclic_point(sst_data.values, coord=ds.longitude.values)
+
+# 3. Plot the Heatmap
+mesh = ax.pcolormesh(
+    lon_cyclic, ds.latitude.values, data_cyclic,
+    transform=ccrs.PlateCarree(),
+    cmap='RdYlBu_r', # Red-Yellow-Blue reversed (standard for SST)
+    vmin=-2, vmax=30 # Typical ocean temperature range
+)
+
+# 4. Add "Earth" Aesthetics
+ax.add_feature(cfeature.LAND, facecolor='white', edgecolor='black', linewidth=0.5)
+ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
+ax.set_global()
+
+# 5. Add Colorbar and Title for ECO-SYNTH
+cb = plt.colorbar(mesh, orientation='horizontal', pad=0.05, aspect=40, shrink=0.7)
+cb.set_label('Potential Temperature ($^\circ$C)', fontsize=12)
+
+plt.title(f'ECO-SYNTH Global Enzyme Thermal Environment\nNASA ECCO v4r4 | {str(sst_data.time.values)[:10]}', 
+          fontsize=15, pad=20)
+
+plt.show()
