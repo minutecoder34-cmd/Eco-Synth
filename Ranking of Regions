@@ -1,0 +1,87 @@
+import os, torch, earthaccess, numpy as np, pandas as pd, xarray as xr
+import torch.nn as nn
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.util import add_cyclic_point
+
+# 1. AUTH & DATA
+EDL_USER, EDL_PASS = "jmcnelis", "#Cowboysgang123"
+netrc_path = os.path.expanduser("~/.netrc")
+with open(netrc_path, "w") as f:
+    f.write(f"machine urs.earthdata.nasa.gov login {EDL_USER} password {EDL_PASS}\n")
+    f.write(f"machine opendap.earthdata.nasa.gov login {EDL_USER} password {EDL_PASS}\n")
+os.chmod(netrc_path, 0o600)
+auth = earthaccess.login()
+
+print("Fetching NASA ECCO v4r4...")
+results = earthaccess.search_data(
+    short_name="ECCO_L4_TEMP_SALINITY_05DEG_MONTHLY_V4R4",
+    cloud_hosted=True,
+    temporal=("2017-01-01", "2017-02-28")
+)
+ds = xr.open_mfdataset(earthaccess.open(results))
+
+# 2. ECO-SYNTH ENGINE
+class EcoSynthGNN(nn.Module):
+    def __init__(self):
+        super().__init__(); self.net = nn.Sequential(nn.Linear(2, 64), nn.ReLU(), nn.Linear(64, 1))
+    def forward(self, x): return self.net(x)
+
+def get_flux(temp, ea):
+    return 1e13 * np.exp(-(ea * 1000) / (8.314 * (temp + 273.15)))
+
+model = EcoSynthGNN()
+
+# 3. GENERATE 110+ REGIONS (Snapped to 0.5 deg grid)
+hotspots = {}
+centers = [(32.25, -145.25), (-33.25, -115.25), (30.25, -40.25), (-25.25, -15.25), (-28.25, 75.25), (35.25, 18.25)]
+for i, (lat, lon) in enumerate(centers):
+    for d_lat in np.arange(-5, 6, 2): # Expand grid
+        for d_lon in np.arange(-5, 6, 2):
+            name = f"Zone_{i+1}_Lat{lat+d_lat}_Lon{lon+d_lon}"
+            hotspots[name] = {"lat": lat + d_lat, "lon": lon + d_lon}
+
+# 4. PROCESS
+research_results = []
+# Surface layer, first time step
+data_slice = ds.isel(time=0, Z=0).load() 
+
+for name, coord in hotspots.items():
+    try:
+        # Extract data with nearest neighbor
+        point = data_slice.sel(latitude=coord['lat'], longitude=coord['lon'], method='nearest')
+        t, s = float(point.THETA), float(point.SALT)
+        
+        if np.isnan(t) or np.isnan(s): continue # Skip land
+        
+        in_t = torch.tensor([[t, s]], dtype=torch.float32)
+        ea_pred = model(in_t).item()
+        flux = get_flux(t, ea_pred)
+        
+        research_results.append({"Region": name, "Lat": coord['lat'], "Lon": coord['lon'], "Temp": t, "Flux": flux})
+    except: continue
+
+# 5. RANKED OUTPUT
+if len(research_results) > 0:
+    ranked = sorted(research_results, key=lambda x: x['Flux'], reverse=True)
+    print("\n" + "="*70)
+    print(f"{'RANK':<5} | {'LOCATION':<35} | {'TEMP':<10} | {'FLUX'}")
+    print("="*70)
+    for i, res in enumerate(ranked[:15], 1):
+        print(f"{i:<5} | {res['Region'][:35]:<35} | {res['Temp']:<10.2f} | {res['Flux']:<15.4e}")
+    print("="*70)
+    print(f"Top Recommendation: {ranked[0]['Region']}")
+    pd.DataFrame(research_results).to_csv("ECOSYNTH_Final.csv", index=False)
+else:
+    print(" Error: No data points found. NASA data may be masked over these coordinates.")
+
+# 6. HEATMAP
+plt.figure(figsize=(12, 6))
+ax = plt.axes(projection=ccrs.Robinson())
+data_c, lon_c = add_cyclic_point(data_slice.THETA.values, coord=ds.longitude.values)
+mesh = ax.pcolormesh(lon_c, ds.latitude.values, data_c, transform=ccrs.PlateCarree(), cmap='RdYlBu_r')
+ax.add_feature(cfeature.LAND, facecolor='lightgray'); ax.add_feature(cfeature.COASTLINE)
+plt.colorbar(mesh, orientation='horizontal', label='Temp (°C)')
+plt.title("ECO-SYNTH Microbial Potential Map")
+plt.show()
