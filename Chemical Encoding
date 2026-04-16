@@ -1,0 +1,50 @@
+!pip install rdkit
+import torch
+import torch.nn as nn
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
+# 1. Molecular Encoding Function
+def get_plastic_embedding(smiles):
+    """Converts SMILES string to a fixed-size numerical vector (Fingerprint)"""
+    mol = Chem.MolFromSmiles(smiles)
+    # Generate a 128-bit Morgan Fingerprint (Circular fingerprint)
+    fingerprint = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=128)
+    # Convert to a list of floats for the Neural Network
+    return torch.tensor([float(b) for b in fingerprint.ToBitString()], dtype=torch.float32)
+
+# 2. Updated Plastic-Aware GNN Architecture
+class EcoSynthGNN_v2(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Input: 2 (Temp/Salt) + 128 (Plastic Fingerprint) = 130 features
+        self.network = nn.Sequential(
+            nn.Linear(130, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2), # Prevents overfitting
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1) # Outputs predicted degradation efficiency (0 to 1)
+        )
+        
+    def forward(self, env_data, plastic_data):
+        # Combine [Temp, Salt] with [Plastic Embedding]
+        combined_input = torch.cat((env_data, plastic_data), dim=1)
+        return torch.sigmoid(self.network(combined_input))
+
+# 3. Define the Plastic "Library"
+plastic_library = {
+    "PET": "O=C(OCC)c1ccc(C(=O)OCC)cc1",
+    "PE":  "CCCCCCCCCC", # Represented as a decane segment
+    "PVC": "ClCC(Cl)CC(Cl)CC(Cl)"
+}
+
+# 4. Example Prediction
+model_v2 = EcoSynthGNN_v2()
+temp_salt = torch.tensor([[28.5, 35.2]]) # Warm Pacific water
+plastic_type = "PET"
+plastic_emb = get_plastic_embedding(plastic_library[plastic_type]).unsqueeze(0)
+
+with torch.no_grad():
+    prediction = model_v2(temp_salt, plastic_emb).item()
+    print(f"Predicted Degradation Efficiency for {plastic_type}: {prediction:.2%}")
