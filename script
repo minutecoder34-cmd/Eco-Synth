@@ -1,0 +1,113 @@
+import os, torch, earthaccess, numpy as np, pandas as pd, xarray as xr
+import torch.nn as nn
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.util import add_cyclic_point
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
+# --- 1. SETUP & NASA DATA STREAMING ---
+EDL_USER, EDL_PASS = "jmcnelis", "#Cowboysgang123"
+netrc_path = os.path.expanduser("~/.netrc")
+with open(netrc_path, "w") as f:
+    f.write(f"machine urs.earthdata.nasa.gov login {EDL_USER} password {EDL_PASS}\n")
+    f.write(f"machine opendap.earthdata.nasa.gov login {EDL_USER} password {EDL_PASS}\n")
+os.chmod(netrc_path, 0o600)
+auth = earthaccess.login()
+
+print("🛰️ Connecting to NASA ECCO v4r4...")
+results = earthaccess.search_data(
+    short_name="ECCO_L4_TEMP_SALINITY_05DEG_MONTHLY_V4R4",
+    cloud_hosted=True,
+    temporal=("2017-01-01", "2017-02-28")
+)
+ds = xr.open_mfdataset(earthaccess.open(results))
+data_slice = ds.isel(time=0, Z=0).load() # Load surface layer into memory
+
+# --- 2. CHEMICAL & MICROBIAL KNOWLEDGE BASE ---
+plastic_library = {
+    "PET": "O=C(OCC)c1ccc(C(=O)OCC)cc1", 
+    "PE":  "CCCCCCCCCC",                
+    "PVC": "ClCC(Cl)CC(Cl)CC(Cl)"       
+}
+
+# Metabolic 'Weights' for different strains
+microbe_library = {
+    "Ideonella_sakaiensis": torch.tensor([0.9, 0.1, 0.2]), # High PET affinity
+    "Pseudomonas_putida":   torch.tensor([0.4, 0.7, 0.5]), # Generalist/PE
+    "Rhodococcus_ruber":    torch.tensor([0.2, 0.8, 0.3])  # High PE/Alkanes
+}
+
+def get_mol_fp(smiles):
+    mol = Chem.MolFromSmiles(smiles)
+    fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=128)
+    return torch.tensor([float(b) for b in fp.ToBitString()], dtype=torch.float32)
+
+# --- 3. ADVANCED GNN ARCHITECTURE ---
+class EcoSynthGNN_v3(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Input: 2 (Env) + 128 (Chem) + 3 (Microbe) = 133 total
+        self.network = nn.Sequential(
+            nn.Linear(133, 512), nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, 128), nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+    def forward(self, env, mol, mic):
+        x = torch.cat((env, mol, mic), dim=1)
+        return torch.sigmoid(self.network(x))
+
+model = EcoSynthGNN_v3()
+
+# --- 4. GLOBAL ANALYSIS ENGINE ---
+target_plastic = "PET"
+target_microbe = "Ideonella_sakaiensis"
+
+mol_input = get_mol_fp(plastic_library[target_plastic]).unsqueeze(0)
+mic_input = microbe_library[target_microbe].unsqueeze(0)
+
+hotspots = []
+centers = [(32.25, -145.25), (-33.25, -115.25), (30.25, -40.25), (-25.25, -15.25), (35.25, 18.25)]
+
+print(f"🧬 Running ECO-SYNTH for {target_microbe} on {target_plastic}...")
+
+analysis_data = []
+for lat_c, lon_c in centers:
+    for d_lat in np.arange(-6, 7, 2):
+        for d_lon in np.arange(-6, 7, 2):
+            try:
+                point = data_slice.sel(latitude=lat_c+d_lat, longitude=lon_c+d_lon, method='nearest')
+                t, s = float(point.THETA), float(point.SALT)
+                if np.isnan(t): continue
+                
+                env_in = torch.tensor([[t, s]], dtype=torch.float32)
+                with torch.no_grad():
+                    efficiency = model(env_in, mol_input, mic_input).item()
+                
+                analysis_data.append({
+                    "Region": f"Lat_{lat_c+d_lat}_Lon_{lon_c+d_lon}",
+                    "Temp": t, "Salt": s, "Efficiency": efficiency
+                })
+            except: continue
+
+# --- 5. RANKING & CSV EXPORT ---
+df = pd.DataFrame(analysis_data)
+df = df.sort_values(by="Efficiency", ascending=False)
+df.to_csv("ECOSYNTH_Final_Report.csv", index=False)
+
+print("\n" + "="*60)
+print(f"TOP DEPLOYMENT LOCATIONS FOR {target_microbe}")
+print(df.head(10)[['Region', 'Temp', 'Efficiency']])
+print("="*60)
+
+# --- 6. VISUALIZATION ---
+plt.figure(figsize=(12, 7))
+ax = plt.axes(projection=ccrs.Robinson())
+data_c, lon_c = add_cyclic_point(data_slice.THETA.values, coord=ds.longitude.values)
+mesh = ax.pcolormesh(lon_c, ds.latitude.values, data_c, transform=ccrs.PlateCarree(), cmap='magma')
+ax.add_feature(cfeature.LAND, facecolor='black'); ax.add_feature(cfeature.COASTLINE, color='white')
+plt.colorbar(mesh, orientation='horizontal', label='Ocean Surface Temp (°C)')
+plt.title(f"ECO-SYNTH Prediction: {target_microbe} vs {target_plastic}")
+plt.show()
